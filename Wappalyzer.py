@@ -1,23 +1,10 @@
-import json
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+
 import re
-import warnings
-import os
-import logging
-import pkgutil
-import pkg_resources
-
+import json
 import requests
-
 from bs4 import BeautifulSoup
-
-logger = logging.getLogger(name=__name__)
-
-
-class WappalyzerError(Exception):
-    """
-    Raised for fatal Wappalyzer errors.
-    """
-    pass
 
 
 class WebPage(object):
@@ -26,7 +13,7 @@ class WebPage(object):
     from any particular HTTP library's API.
     """
 
-    def __init__(self, url, html, headers):
+    def __init__(self, url, verify=True):
         """
         Initialize a new WebPage object.
 
@@ -40,21 +27,13 @@ class WebPage(object):
         headers : dict
             The HTTP response headers
         """
+        response = requests.get(url, verify=verify, timeout=30)
         self.url = url
-        self.html = html
-        self.headers = headers
+        # if use response.text, could have some error
+        self.html = response.content.decode('utf8')
+        self.headers = response.headers
 
-        try:
-            self.headers.keys()
-        except AttributeError:
-            raise ValueError("Headers must be a dictionary-like object")
-
-        self._parse_html()
-
-    def _parse_html(self):
-        """
-        Parse the HTML with BeautifulSoup to find <script> and <meta> tags.
-        """
+        # Parse the HTML with BeautifulSoup to find <script> and <meta> tags.
         self.parsed_html = soup = BeautifulSoup(self.html, "html.parser")
         self.scripts = [script['src'] for script in
                         soup.findAll('script', src=True)]
@@ -64,40 +43,24 @@ class WebPage(object):
                     'meta', attrs=dict(name=True, content=True))
         }
 
-    @classmethod
-    def new_from_url(cls, url, verify=True):
-        """
-        Constructs a new WebPage object for the URL,
-        using the `requests` module to fetch the HTML.
+        self.title = soup.title.string if soup.title else 'None'
 
-        Parameters
-        ----------
+        wappalyzer = Wappalyzer()
+        self.apps = wappalyzer.analyze(self)
 
-        url : str
-        verify: bool
-        """
-        response = requests.get(url, verify=verify, timeout=2.5)
-        return cls.new_from_response(response)
-
-    @classmethod
-    def new_from_response(cls, response):
-        """
-        Constructs a new WebPage object for the response,
-        using the `BeautifulSoup` module to parse the HTML.
-
-        Parameters
-        ----------
-
-        response : requests.Response object
-        """
-        return cls(response.url, html=response.text, headers=response.headers)
+    def info(self):
+        return {
+            "apps": ';'.join(self.apps),
+            "title": self.title,
+        }
 
 
 class Wappalyzer(object):
     """
     Python Wappalyzer driver.
     """
-    def __init__(self, categories, apps):
+
+    def __init__(self, apps_file=None):
         """
         Initialize a new Wappalyzer instance.
 
@@ -109,28 +72,18 @@ class Wappalyzer(object):
         apps : dict
             Map of app names to app dicts, as in apps.json.
         """
-        self.categories = categories
-        self.apps = apps
-
-        for name, app in self.apps.items():
-            self._prepare_app(app)
-
-    @classmethod
-    def latest(cls, apps_file=None):
-        """
-        Construct a Wappalyzer instance using a apps db path passed in via
-        apps_file, or alternatively the default in data/apps.json
-        """
         if apps_file:
             with open(apps_file, 'r') as fd:
                 obj = json.load(fd)
         else:
-            with open("apps.json", 'r') as fd:
+            with open("./thirdparty/Wappalyzer/apps.json", 'r') as fd:
                 obj = json.load(fd)
-            # print(str(pkg_resources.resource_string(__name__, "data/apps.json")))
-            # obj = json.loads(str(pkg_resources.resource_string(__name__, "data/apps.json")))
 
-        return cls(categories=obj['categories'], apps=obj['apps'])
+        self.categories = obj['categories']
+        self.apps = obj['apps']
+
+        for name, app in self.apps.items():
+            self._prepare_app(app)
 
     def _prepare_app(self, app):
         """
@@ -139,9 +92,8 @@ class Wappalyzer(object):
 
         # Ensure these keys' values are lists
         for key in ['url', 'html', 'script', 'implies']:
-            try:
-                value = app[key]
-            except KeyError:
+            value = app.get(key)
+            if value is None:
                 app[key] = []
             else:
                 if not isinstance(value, list):
@@ -149,9 +101,8 @@ class Wappalyzer(object):
 
         # Ensure these keys exist
         for key in ['headers', 'meta']:
-            try:
-                value = app[key]
-            except KeyError:
+            value = app.get(key)
+            if value is None:
                 app[key] = {}
 
         # Ensure the 'meta' key is a dict
@@ -182,10 +133,6 @@ class Wappalyzer(object):
         try:
             return re.compile(regex, re.I)
         except re.error as e:
-            warnings.warn(
-                "Caught '{error}' compiling regex: {regex}"
-                .format(error=e, regex=regex)
-            )
             # regex that never matches:
             # http://stackoverflow.com/a/1845097/413622
             return re.compile(r'(?!x)x')
@@ -200,6 +147,7 @@ class Wappalyzer(object):
         for regex in app['url']:
             if regex.search(webpage.url):
                 return True
+
         for name, regex in app['headers'].items():
             if name in webpage.headers:
                 content = webpage.headers[name]
@@ -228,10 +176,8 @@ class Wappalyzer(object):
         def __get_implied_apps(apps):
             _implied_apps = set()
             for app in apps:
-                try:
+                if 'implies' in self.apps[app]:
                     _implied_apps.update(set(self.apps[app]['implies']))
-                except KeyError:
-                    pass
             return _implied_apps
 
         implied_apps = __get_implied_apps(detected_apps)
